@@ -76,14 +76,43 @@ def sanitize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     Adapta metadatos a los tipos permitidos por Chroma 1.x.
 
     Chroma solo acepta valores: str, int, float, bool o None.
-    Cualquier lista o dict se convierte en un JSON string.
+    Cualquier lista, dict u otro tipo se convierte en un JSON string.
+    
+    Características adicionales:
+    - Excluye campos None para evitar problemas con deserialización
+    - Convierte explícitamente booleanos a bool (por si acaso)
+    - Trunca strings muy largos para evitar límites de payload
     """
     safe: Dict[str, Any] = {}
+    MAX_STR_LEN = 5000  # Límite sensato para un campo metadata
+    
     for k, v in meta.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
+        # Excluir valores None para evitar problemas de deserialización
+        if v is None:
+            continue
+            
+        # Tipos primitivos seguros
+        if isinstance(v, bool):  # Verificar bool ANTES de int (bool es subclase de int)
             safe[k] = v
+        elif isinstance(v, (int, float)):
+            safe[k] = v
+        elif isinstance(v, str):
+            # Truncar strings muy largos
+            safe[k] = v[:MAX_STR_LEN] if len(v) > MAX_STR_LEN else v
         else:
-            safe[k] = json.dumps(v, ensure_ascii=False)
+            # Cualquier otro tipo (list, dict, object, etc.) → JSON string
+            try:
+                json_str = json.dumps(v, ensure_ascii=False)
+                # Truncar JSON también si es muy largo
+                safe[k] = json_str[:MAX_STR_LEN] if len(json_str) > MAX_STR_LEN else json_str
+            except (TypeError, ValueError) as e:
+                # Si no se puede serializar a JSON, usar su representación string
+                print(
+                    f"[WARN] No se pudo serializar el campo '{k}' con valor {type(v).__name__}. "
+                    f"Usando str(): {e}"
+                )
+                safe[k] = str(v)[:MAX_STR_LEN]
+    
     return safe
 
 
@@ -119,7 +148,14 @@ def load_gold_documents(
                 if not line:
                     continue
 
-                rec = json.loads(line)
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError as e:
+                    print(
+                        f"[WARN] Línea inválida en {file_name}:{line_idx+1}. "
+                        f"Error JSON: {e}. Saltando..."
+                    )
+                    continue
 
                 text = (
                     rec.get("page_content")
@@ -139,11 +175,12 @@ def load_gold_documents(
                 # Asegurar source por defecto
                 meta.setdefault("source", meta.get("source", file_name))
 
-                # Opcional: string plano de keywords
+                # Opcional: string plano de keywords (ahora ya está hecho en enrich.py)
+                # pero lo dejamos por compatibilidad
                 if isinstance(meta.get("keywords"), list):
-                    meta["keywords_str"] = ", ".join(meta["keywords"])
+                    meta["keywords_str"] = ", ".join(str(k) for k in meta["keywords"])
 
-                # Sanear tipos para Chroma
+                # Sanear tipos para Chroma ANTES de guardar
                 meta = sanitize_metadata(meta)
 
                 ids.append(str(chunk_id))
@@ -210,13 +247,20 @@ def build_or_load_vectorstore(
 
     new_embeddings = EMBED_FN(new_texts)
 
-    collection.add(
-        ids=new_ids,
-        documents=new_texts,
-        metadatas=new_metadatas,
-        embeddings=new_embeddings,
-    )
-    print("[Chroma] Ingesta completada.")
+    try:
+        collection.add(
+            ids=new_ids,
+            documents=new_texts,
+            metadatas=new_metadatas,
+            embeddings=new_embeddings,
+        )
+        print("[Chroma] Ingesta completada.")
+    except Exception as e:
+        print(
+            f"[ERROR] Falló la ingesta en Chroma: {type(e).__name__}: {str(e)[:200]}"
+        )
+        print("[DEBUG] Revisa que todos los metadatos sean tipos válidos (str, int, float, bool, None)")
+        raise
 
     return collection
 
