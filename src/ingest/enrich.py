@@ -111,6 +111,9 @@ class GeminiEnricher:
         Enriquecimiento de un solo chunk de texto usando Gemini/Gemma.
         Si el modelo no soporta JSON mode (p.ej. gemma-3-*), se hace
         prompting para JSON y se parsea manualmente.
+        
+        Raises:
+            ValueError: Si la respuesta de Gemini no se puede parsear correctamente.
         """
         self.rate_limiter.wait_for_slot()
 
@@ -141,10 +144,10 @@ class GeminiEnricher:
             prompt = base_prompt + (
                 "Responde SOLO con los campos solicitados en formato JSON con esta forma:\n"
                 "{\n"
-                '  \"summary\": \"...\",\n'
-                '  \"keywords\": [\"...\"],\n'
-                '  \"entities\": [\n'
-                '    {\"type\": \"...\", \"text\": \"...\"}\n'
+                '  "summary": "...",\n'
+                '  "keywords": ["..."],\n'
+                '  "entities": [\n'
+                '    {"type": "...", "text": "..."}\n'
                 "  ]\n"
                 "}\n"
             )
@@ -159,6 +162,17 @@ class GeminiEnricher:
                 ),
             )
 
+            # Validar que response.parsed no sea None
+            if response.parsed is None:
+                finish_reason = None
+                if response.candidates:
+                    finish_reason = getattr(response.candidates[0], "finish_reason", None)
+                raise ValueError(
+                    f"[ERROR] Gemini no devolvió un objeto parseado válido. "
+                    f"finish_reason={finish_reason}, "
+                    f"raw_text={getattr(response, 'text', None)!r}"
+                )
+
             return response.parsed
 
         # --------- RAMA 2: Gemma 3 (NO soporta JSON mode) ---------
@@ -166,10 +180,10 @@ class GeminiEnricher:
         prompt = base_prompt + (
             "Responde SOLO con un JSON válido (sin texto adicional) con esta forma exacta:\n"
             "{\n"
-            '  \"summary\": \"texto del resumen\",\n'
-            '  \"keywords\": [\"palabra1\", \"palabra2\"],\n'
-            '  \"entities\": [\n'
-            '    {\"type\": \"PERSON\", \"text\": \"Ejemplo de nombre\"}\n'
+            '  "summary": "texto del resumen",\n'
+            '  "keywords": ["palabra1", "palabra2"],\n'
+            '  "entities": [\n'
+            '    {"type": "PERSON", "text": "Ejemplo de nombre"}\n'
             "  ]\n"
             "}\n"
             "No incluyas comentarios, explicaciones ni texto fuera del JSON.\n"
@@ -207,7 +221,7 @@ class GeminiEnricher:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            print("Error al parsear JSON devuelto por el modelo:\n", raw)
+            print("[ERROR] Falló al parsear JSON devuelto por el modelo:\n", raw)
             raise e
 
         return ChunkMetadata(**data)
@@ -250,6 +264,9 @@ def enrich_directory(
     Recorre todos los .jsonl de la carpeta silver_chunk_dir, enriquece cada chunk
     con Gemini y guarda los resultados en gold_dir (un archivo .jsonl de salida
     por cada archivo de entrada).
+    
+    Los chunks que fallen en el enriquecimiento serán saltados con un log de advertencia,
+    permitiendo que el pipeline continúe con los demás.
     """
     enricher = GeminiEnricher(
         model=model_name,
@@ -267,14 +284,15 @@ def enrich_directory(
 
         # Saltar si el archivo ya fue enriquecido
         if os.path.exists(output_path):
-            print(f"Saltando {input_path} porque ya existe {output_path}")
+            print(f"[SKIP] Saltando {input_path} porque ya existe {output_path}")
             continue
 
-        print(f"Procesando {input_path} -> {output_path}")
+        print(f"[START] Procesando {input_path} -> {output_path}")
 
         enriched_records: List[Dict] = []
+        skipped_chunks = 0
 
-        for chunk in iter_jsonl_chunks(input_path):
+        for chunk_idx, chunk in enumerate(iter_jsonl_chunks(input_path)):
             text = (
                 chunk.get("page_content")
                 or chunk.get("text")
@@ -292,7 +310,16 @@ def enrich_directory(
                     if key in chunk:
                         base_meta[key] = chunk[key]
 
-            metadata_model = enricher.enrich_chunk(text, doc_metadata=base_meta)
+            # Envolver enrich_chunk en try/except para capturar fallos individuales
+            try:
+                metadata_model = enricher.enrich_chunk(text, doc_metadata=base_meta)
+            except Exception as e:
+                skipped_chunks += 1
+                print(
+                    f"[WARN] Falló el enriquecimiento del chunk {chunk_idx} en {file_name}: "
+                    f"{type(e).__name__}: {str(e)[:100]}"
+                )
+                continue
 
             enriched_meta = {
                 **base_meta,
@@ -309,7 +336,10 @@ def enrich_directory(
             enriched_records.append(enriched_record)
 
         write_jsonl(enriched_records, output_path)
-        print(f"Guardados {len(enriched_records)} chunks enriquecidos en {output_path}")
+        print(
+            f"[DONE] Guardados {len(enriched_records)} chunks enriquecidos en {output_path} "
+            f"({skipped_chunks} saltados por error)"
+        )
 
 
 def print_example_from_gold(gold_dir: str) -> None:
@@ -355,4 +385,3 @@ if __name__ == "__main__":
 
     # Mostrar ejemplo (si ya hay algo enriquecido)
     print_example_from_gold(gold_dir)
-

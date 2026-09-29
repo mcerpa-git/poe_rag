@@ -19,7 +19,7 @@ El proyecto combina:
 
 2. `src/`
    - `ingest/`
-     - `ingest.py`      → carga PDFs, normaliza texto y metadata, genera capa *silver*.
+     - `loaders.py`      → carga PDFs, normaliza texto y metadata, genera capa *silver*.
      - `normalize.py`   → reglas de limpieza y normalización de metadata.
      - `spliter.py`     → divide documentos en chunks y genera `silver/chunked`.
      - `enrich.py`      → enriquece chunks con Gemini y genera capa *gold*.
@@ -66,14 +66,16 @@ python -m venv .venv
 source .venv/bin/activate  # en ubuntu: .venv\bin\activate
 
 pip install -r requirements.txt
+```
 
 ## Pipeline básico de datos y ejecución
 
+```bash
 # 1) Ingesta y normalización (genera data/silver/*.jsonl)
-python -m src.ingest.ingest
+python -m src.ingest.loaders
 
 # 2) Chunking (genera data/silver/chunked/*.jsonl)
-python -m src.spliter
+python -m src.ingest.spliter
 
 # 3) Enriquecimiento con Gemini (genera data/gold/*.jsonl)
 python -m src.ingest.enrich
@@ -84,7 +86,8 @@ python -m src.backend.vectorstore
 # 5) Lanzar la interfaz Gradio
 python -m src.frontend.gradio_app
 ```
+
 La aplicación quedará disponible, por defecto, en:
 ```bash    
 http://0.0.0.0:7860
-
+```
